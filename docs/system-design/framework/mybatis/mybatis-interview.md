@@ -17,7 +17,7 @@ MyBatis 技术内幕系列博客，从原理和源码角度，介绍了其内部
 - `${}`是 Properties 文件中的变量占位符，它可以用于标签属性值和 sql 内部，属于静态文本替换，比如\${driver}会被静态替换为`com.mysql.jdbc.Driver`。
 - `#{}`是 sql 的参数占位符，MyBatis 会将 sql 中的`#{}`替换为?号，在 sql 执行前会使用 PreparedStatement 的参数设置方法，按序给 sql 的?号占位符设置参数值，比如 ps.setInt(0, parameterValue)，`#{item.name}` 的取值方式为使用反射从参数对象中获取 item 对象的 name 属性值，相当于 `param.getItem().getName()`。
 
-#### 2、Xml 映射文件中，除了常见的 select|insert|updae|delete 标签之外，还有哪些标签？
+#### 2、Xml 映射文件中，除了常见的 select|insert|update|delete 标签之外，还有哪些标签？
 
 注：这道题是京东面试官面试我时问的。
 
@@ -25,13 +25,123 @@ MyBatis 技术内幕系列博客，从原理和源码角度，介绍了其内部
 
 #### 3、最佳实践中，通常一个 Xml 映射文件，都会写一个 Dao 接口与之对应，请问，这个 Dao 接口的工作原理是什么？Dao 接口里的方法，参数不同时，方法能重载吗？
 
-注：这道题也是京东面试官面试我时问的。
+注：这道题也是京东面试官面试我被问的。
 
 答：Dao 接口，就是人们常说的 `Mapper`接口，接口的全限名，就是映射文件中的 namespace 的值，接口的方法名，就是映射文件中`MappedStatement`的 id 值，接口方法内的参数，就是传递给 sql 的参数。`Mapper`接口是没有实现类的，当调用接口方法时，接口全限名+方法名拼接字符串作为 key 值，可唯一定位一个`MappedStatement`，举例：`com.mybatis3.mappers.StudentDao.findStudentById`，可以唯一找到 namespace 为`com.mybatis3.mappers.StudentDao`下面`id = findStudentById`的`MappedStatement`。在 MyBatis 中，每一个`<select>`、`<insert>`、`<update>`、`<delete>`标签，都会被解析为一个`MappedStatement`对象。
 
-Dao 接口里的方法，是不能重载的，因为是全限名+方法名的保存和寻找策略。
+~~Dao 接口里的方法，是不能重载的，因为是全限名+方法名的保存和寻找策略。~~
+
+Dao 接口里的方法可以重载，但是Mybatis的XML里面的ID不允许重复。
+
+Mybatis版本3.3.0，亲测如下：
+
+```java
+/**
+ * Mapper接口里面方法重载
+ */
+public interface StuMapper {
+
+	List<Student> getAllStu();
+    
+	List<Student> getAllStu(@Param("id") Integer id);
+}
+```
+
+然后在 `StuMapper.xml` 中利用Mybatis的动态sql就可以实现。
+
+```java
+	<select id="getAllStu" resultType="com.pojo.Student">
+ 		select * from student
+		<where>
+			<if test="id != null">
+				id = #{id}
+			</if>
+		</where>
+ 	</select>
+```
+
+能正常运行，并能得到相应的结果，这样就实现了在Dao接口中写重载方法。
+
+**Mybatis 的 Dao 接口可以有多个重载方法，但是多个接口对应的映射必须只有一个，否则启动会报错。**
+
+相关 issue ：[更正：Dao 接口里的方法可以重载，但是Mybatis的XML里面的ID不允许重复！](https://github.com/Snailclimb/JavaGuide/issues/1122)。
 
 Dao 接口的工作原理是 JDK 动态代理，MyBatis 运行时会使用 JDK 动态代理为 Dao 接口生成代理 proxy 对象，代理对象 proxy 会拦截接口方法，转而执行`MappedStatement`所代表的 sql，然后将 sql 执行结果返回。
+
+##### ==补充：==
+
+Dao接口方法可以重载，但是需要满足以下条件：
+
+1. 仅有一个无参方法和一个有参方法
+2. 多个有参方法时，参数数量必须一致。且使用相同的 `@Param` ，或者使用 `param1` 这种
+
+测试如下：
+
+`PersonDao.java`
+
+```java
+Person queryById();
+
+Person queryById(@Param("id") Long id);
+
+Person queryById(@Param("id") Long id, @Param("name") String name);
+```
+
+`PersonMapper.xml`
+
+```xml
+<select id="queryById" resultMap="PersonMap">
+    select
+      id, name, age, address
+    from person
+    <where>
+        <if test="id != null">
+            id = #{id}
+        </if>
+        <if test="name != null and name != ''">
+            name = #{name}
+        </if>
+    </where>
+    limit 1
+</select>
+```
+
+`org.apache.ibatis.scripting.xmltags.DynamicContext.ContextAccessor#getProperty`方法用于获取`<if>`标签中的条件值
+
+```java
+public Object getProperty(Map context, Object target, Object name) {
+  Map map = (Map) target;
+
+  Object result = map.get(name);
+  if (map.containsKey(name) || result != null) {
+    return result;
+  }
+
+  Object parameterObject = map.get(PARAMETER_OBJECT_KEY);
+  if (parameterObject instanceof Map) {
+    return ((Map)parameterObject).get(name);
+  }
+
+  return null;
+}
+```
+
+`parameterObject`为map，存放的是Dao接口中参数相关信息。
+
+`((Map)parameterObject).get(name)`方法如下
+
+```java
+public V get(Object key) {
+  if (!super.containsKey(key)) {
+    throw new BindingException("Parameter '" + key + "' not found. Available parameters are " + keySet());
+  }
+  return super.get(key);
+}
+```
+
+1. `queryById()`方法执行时，`parameterObject`为null，`getProperty`方法返回null值，`<if>`标签获取的所有条件值都为null，所有条件不成立，动态sql可以正常执行。
+2. `queryById(1L)`方法执行时，`parameterObject`为map，包含了`id`和`param1`两个key值。当获取`<if>`标签中`name`的属性值时，进入`((Map)parameterObject).get(name)`方法中，map中key不包含`name`，所以抛出异常。
+3. `queryById(1L,"1")`方法执行时，`parameterObject`中包含`id`,`param1`,`name`,`param2`四个key值，`id`和`name`属性都可以获取到，动态sql正常执行。
 
 #### 4、MyBatis 是如何进行分页的？分页插件的原理是什么？
 
@@ -87,14 +197,14 @@ Dao 接口的工作原理是 JDK 动态代理，MyBatis 运行时会使用 JDK �
 
 举例：下面 join 查询出来 6 条记录，一、二列是 Teacher 对象列，第三列为 Student 对象列，MyBatis 去重复处理后，结果为 1 个老师 6 个学生，而不是 6 个老师 6 个学生。
 
- t_id t_name s_id
-
-| 1 | teacher | 38 |
-| 1 | teacher | 39 |
-| 1 | teacher | 40 |
-| 1 | teacher | 41 |
-| 1 | teacher | 42 |
-| 1 | teacher | 43 |
+| t_id | t_name  | s_id |
+| ---- | ------- | ---- |
+| 1    | teacher | 38   |
+| 1    | teacher | 39   |
+| 1    | teacher | 40   |
+| 1    | teacher | 41   |
+| 1    | teacher | 42   |
+| 1    | teacher | 43   |
 
 #### 10、MyBatis 是否支持延迟加载？如果支持，它的实现原理是什么？
 
@@ -128,7 +238,7 @@ Dao 接口的工作原理是 JDK 动态代理，MyBatis 运行时会使用 JDK �
 
 **`SimpleExecutor`：**每执行一次 update 或 select，就开启一个 Statement 对象，用完立刻关闭 Statement 对象。
 
-**``ReuseExecutor`：**执行 update 或 select，以 sql 作为 key 查找 Statement 对象，存在就使用，不存在就创建，用完后，不关闭 Statement 对象，而是放置于 Map<String, Statement>内，供下一次使用。简言之，就是重复使用 Statement 对象。
+**`ReuseExecutor`：**执行 update 或 select，以 sql 作为 key 查找 Statement 对象，存在就使用，不存在就创建，用完后，不关闭 Statement 对象，而是放置于 Map<String, Statement>内，供下一次使用。简言之，就是重复使用 Statement 对象。
 
 **`BatchExecutor`：**执行 update（没有 select，JDBC 批处理不支持 select），将所有 sql 都添加到批处理中（addBatch()），等待统一执行（executeBatch()），它缓存了多个 Statement 对象，每个 Statement 对象都是 addBatch()完毕后，等待逐一执行 executeBatch()批处理。与 JDBC 批处理相同。
 
